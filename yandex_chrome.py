@@ -60,8 +60,13 @@ def org_url(url: str) -> tuple[str, str] | None:
 
 def check_page(driver) -> None:
     path = urlsplit(driver.current_url).path.lower()
-    if "showcaptcha" in path or CHALLENGE_MESSAGE.search(driver.title):
-        raise CardError("access_restricted", "Яндекс ограничил доступ с IP сервера.")
+    title = driver.title or ""
+    if "showcaptcha" in path or CHALLENGE_MESSAGE.search(title):
+        raise CardError("access_restricted", "Яндекс показал ограничение доступа.")
+    if not title:
+        body = driver.execute_script("return (document.body?.innerText || '').trim().slice(0, 32)")
+        if isinstance(body, str) and body.casefold() == "limited":
+            raise CardError("access_restricted", "Карты Яндекса вернули страницу limited.")
 
 
 def listing_links(driver) -> tuple[list, dict[str, str]]:

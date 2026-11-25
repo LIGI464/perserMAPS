@@ -3,6 +3,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ ACCESS_MESSAGE = re.compile(r"captcha|капча|access denied|доступ за
 PARSER_ERROR = re.compile(r"(?m)^.*\bERROR\b|ошибка во время работы парсера|данные не получены", re.I)
 NO_MATCHES = "точных совпадений нет"
 SLUG = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+WORKER_ERRORS = re.compile(r"(?m)^(?:[\w]+\.)*([\w]*(?:Error|Exception))(?=:)|\b(net::ERR_[A-Z0-9_]+)\b")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -134,16 +137,24 @@ class MapSources:
                     log_text = stream.read().decode(errors="replace")
                 if ACCESS_MESSAGE.search(log_text):
                     return Batch([], Issue(source, "access_restricted", "2ГИС ограничил доступ с IP сервера."))
+            load_error = None
             try:
-                data = json.loads(output.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                data = json.loads(output.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError) as error:
                 data = None
+                load_error = type(error).__name__
 
-            if source == "2gis" and isinstance(data, list):
+            if source == "2gis":
                 rows = [entry for item in objects(data) if (entry := from_2gis(item, target.city.name))]
-                if status or PARSER_ERROR.search(log_text) or (not rows and NO_MATCHES not in log_text.casefold()):
-                    return Batch(rows, Issue(source, "browser_result", "Проверьте выдачу 2ГИС и запуск Chrome на VPS."))
-                return Batch(rows)
+                if not status and not PARSER_ERROR.search(log_text) and isinstance(data, list):
+                    if rows or NO_MATCHES in log_text.casefold():
+                        return Batch(rows)
+                console_errors = sorted({name or network_error for name, network_error in WORKER_ERRORS.findall(log_text)})
+                logger.warning(
+                    "2GIS worker: exit=%d output=%s cards=%d errors=%s",
+                    status, load_error or type(data).__name__, len(rows), ",".join(console_errors) or "none",
+                )
+                return Batch(rows, Issue(source, "browser_result", f"2ГИС завершил запуск с кодом {status}. Подробности в журнале службы."))
             if source == "yandex" and not status and isinstance(data, dict):
                 rows = []
                 for record in objects(data.get("companies")):
