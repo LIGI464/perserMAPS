@@ -15,7 +15,7 @@ def call(base: str, path: str, key: str, payload: dict | None = None) -> dict:
 
 def start() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("source", choices=("both", "2gis", "yandex"))
+    parser.add_argument("source", choices=("default", "both", "2gis", "yandex"))
     parser.add_argument("city")
     parser.add_argument("company")
     parser.add_argument("limit", type=int)
@@ -28,10 +28,11 @@ def start() -> int:
     key = next((line.partition("=")[2] for line in lines if line.startswith("PARSER_API_KEY=")), "")
     if not key:
         raise SystemExit("В файле конфигурации отсутствует ключ парсера.")
+    payload = {"city": args.city, "company": args.company, "limit": args.limit}
+    if args.source != "default":
+        payload["source"] = args.source
     try:
-        started = call(args.base.rstrip("/"), "/v1/search", key, {
-            "source": args.source, "city": args.city, "company": args.company, "limit": args.limit,
-        })
+        started = call(args.base.rstrip("/"), "/v1/search", key, payload)
         print(f"Поиск запущен: {started['job_id']}", flush=True)
         finish_by = time.monotonic() + 290
         while True:

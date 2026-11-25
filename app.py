@@ -142,6 +142,9 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
     api_key = os.environ.get("PARSER_API_KEY", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", api_key):
         raise RuntimeError("Задайте PARSER_API_KEY длиной не менее 32 символов.")
+    default_source = os.environ.get("PARSER_DEFAULT_SOURCE", "both")
+    if default_source not in ("both", "2gis", "yandex"):
+        raise RuntimeError("PARSER_DEFAULT_SOURCE должен быть both, 2gis или yandex.")
     home = Path(__file__).resolve().parent
     store = CalledCompanies(Path(os.environ.get("PARSER_DB_PATH", "data/called.sqlite3")))
     if source_override is None:
@@ -189,7 +192,10 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         store.check()
-        return {"status": "ok", "sources": ["2gis", "yandex"], "catalog_cities": len(sources.cities)}
+        return {
+            "status": "ok", "sources": ["2gis", "yandex"],
+            "default_source": default_source, "catalog_cities": len(sources.cities),
+        }
 
     @app.post("/v1/search", status_code=202, dependencies=[Depends(require_key)])
     async def start_search(query: SearchRequest) -> SearchStarted:
@@ -201,6 +207,8 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
             )
         if len(jobs) == JOB_HISTORY:
             del jobs[next(iter(jobs))]
+        if "source" not in query.model_fields_set:
+            query = query.model_copy(update={"source": default_source})
         job = Job(uuid4().hex, query.limit)
         jobs[job.id] = job
         active = asyncio.create_task(run(query, job))
