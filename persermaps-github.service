@@ -1,0 +1,21 @@
+[Unit]
+Description=Company search using the GitHub maps parsers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=persermaps-github
+Group=persermaps-github
+StateDirectory=persermaps-github
+WorkingDirectory=/opt/persermaps-github
+EnvironmentFile=/etc/persermaps-github.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/persermaps-github/venv/bin/uvicorn app:create_app --factory --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=3
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
