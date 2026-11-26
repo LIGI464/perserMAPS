@@ -24,6 +24,7 @@ LISTING_SELECTOR = "a.search-snippet-view__link-overlay, a[href*='/maps/org/']"
 SEARCH_INPUT = "input.search-form-view__input, .search-form-view input, input[role='searchbox'], input[aria-label='Поиск'], input[aria-label='Search']"
 SEARCH_BUTTON = ".small-search-form-view__button, .search-form-view button[type='submit'], button[aria-label='Найти'], button[aria-label='Search']"
 HEADING_SELECTOR = "h1.orgpage-header-view__header, h1.business-card-title-view__title, h1[itemprop='name']"
+ORG_PHONE_SELECTOR = ".orgpage-phones-view__phone-number"
 CONTACT_SELECTORS = (
     "[role='tab']", "button", "[role='button']",
 )
@@ -138,7 +139,10 @@ def click_public_contacts(driver) -> None:
                     and control.is_displayed() and control.is_enabled()):
                 control.click()
                 with suppress(TimeoutException):
-                    selector = ".business-contacts-view__address-link" if caption == "контакты" else "a[href^='tel:'], .card-phones-view__number"
+                    selector = (
+                        ".business-contacts-view__address-link" if caption == "контакты"
+                        else f"a[href^='tel:'], .card-phones-view__number, {ORG_PHONE_SELECTOR}"
+                    )
                     WebDriverWait(driver, 2).until(lambda page: page.find_elements(By.CSS_SELECTOR, selector))
                 check_page(driver)
                 break
@@ -160,6 +164,7 @@ def parse_card(html: str, identity: str, parser) -> dict | None:
         address = ", ".join(part for part in (locality, street) if part)
 
     phones = parser.get_phone(soup) or []
+    phones.extend(html_value(element) for element in soup.select(ORG_PHONE_SELECTOR))
     phones.extend(text(anchor.get("href")) for anchor in soup.select("a[href^='tel:']"))
     socials = [text(url) for url in parser.get_social(soup) or []]
     socials.extend(text(anchor.get("href")) for anchor in soup.select(
