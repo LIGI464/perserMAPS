@@ -9,6 +9,14 @@ const emptyMessage = document.getElementById("empty-message");
 const resultTable = document.getElementById("results-table");
 const results = document.getElementById("result-rows");
 const sourceNames = { "2gis": "2ГИС", yandex: "Яндекс Карты" };
+const contactHostAliases = {
+  "vk.com": "vk.ru",
+  "vk.ru": "vk.ru",
+  "wa.me": "api.whatsapp.com",
+  "whatsapp.com": "api.whatsapp.com",
+  "t.me": "t.me",
+  "telegram.me": "t.me",
+};
 
 let searching = false;
 let pendingMarks = 0;
@@ -95,6 +103,13 @@ function contactUrl(value, phones) {
   return null;
 }
 
+function socialLabel(href) {
+  const url = new URL(href);
+  const host = url.hostname;
+  const domain = Object.keys(contactHostAliases).find((key) => host === key || host.endsWith(`.${key}`));
+  return domain ? `https://${contactHostAliases[domain]}/` : `${url.protocol}//${host}/`;
+}
+
 function addContacts(row, values, label, phones = false) {
   const cell = addCell(row, null, label);
   if (!values.length) return;
@@ -108,8 +123,9 @@ function addContacts(row, values, label, phones = false) {
     }
     const link = document.createElement("a");
     link.href = href;
-    link.textContent = value;
+    link.textContent = phones ? value : socialLabel(href);
     if (!phones) {
+      link.className = "social-link";
       link.target = "_blank";
       link.rel = "noopener noreferrer";
     }
