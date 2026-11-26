@@ -141,7 +141,6 @@ checkout_source() {
 }
 
 checkout_source "$application_dir/sources/parser-2gis" https://github.com/interlark/parser-2gis.git e12cc050ea811ed76e65a1be938214b6583f9072
-checkout_source "$application_dir/sources/parser_maps" https://github.com/artemsteshenko/parser_maps.git 6049374956208280004e732bff2985c7ddd35d04
 
 copy_application_files
 

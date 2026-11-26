@@ -1,4 +1,4 @@
-"""Linux entry point using parser_maps' SoupContentParser on cards opened in Chrome."""
+"""Search public Yandex Maps pages in Chrome and parse their business cards."""
 
 import argparse
 from contextlib import suppress
@@ -27,10 +27,14 @@ BUSINESS_RESULT_TITLE = ".search-business-snippet-view__title"
 BUSINESS_RESULT_ADDRESS = ".search-business-snippet-view__address"
 SEARCH_INPUT = "input.search-form-view__input, .search-form-view input, input[role='searchbox'], input[aria-label='Поиск'], input[aria-label='Search']"
 SEARCH_BUTTON = ".small-search-form-view__button, .search-form-view button[type='submit'], button[aria-label='Найти'], button[aria-label='Search']"
-HEADING_SELECTOR = "h1.orgpage-header-view__header, h1.business-card-title-view__title, h1[itemprop='name']"
-ORG_PHONE_SELECTOR = ".orgpage-phones-view__phone-number"
+HEADING_SELECTOR = ".orgpage-header-view__header, .business-card-title-view__title, h1[itemprop='name']"
+ADDRESS_SELECTOR = ".business-contacts-view__address-link, .card-contacts-view__address"
+PHONE_SELECTOR = ".card-phones-view__number, .orgpage-phones-view__phone-number, [itemprop='telephone']"
+TEL_SELECTOR = "a[href^='tel:' i]"
 SOCIAL_BUTTON_SELECTOR = ".business-contacts-view__social-button a[href]"
-CARD_DETAIL_SELECTOR = f"{HEADING_SELECTOR}, .business-contacts-view, {ORG_PHONE_SELECTOR}, {SOCIAL_BUTTON_SELECTOR}"
+PHONE_DETAILS = f"{PHONE_SELECTOR}, {TEL_SELECTOR}"
+CONTACT_DETAILS = f"{ADDRESS_SELECTOR}, {PHONE_DETAILS}, {SOCIAL_BUTTON_SELECTOR}"
+CARD_DETAIL_SELECTOR = f"{HEADING_SELECTOR}, .business-contacts-view, {CONTACT_DETAILS}"
 CONTACT_SELECTORS = (
     "[role='tab']", "button", "[role='button']",
 )
@@ -165,19 +169,18 @@ def gather_links(driver, city: str, query: str, count: int) -> dict[str, Listing
 
 
 def click_public_contacts(driver) -> None:
-    for caption in ("контакты", "phone"):
+    for contacts_tab, selector in ((True, CONTACT_DETAILS), (False, PHONE_DETAILS)):
         for control in driver.find_elements(By.CSS_SELECTOR, ", ".join(CONTACT_SELECTORS)):
             label = text(control.text or control.get_attribute("aria-label"))
-            if (CONTACT_BUTTON.fullmatch(label) and (label.casefold() == "контакты") == (caption == "контакты")
+            if (CONTACT_BUTTON.fullmatch(label) and (label.casefold() == "контакты") == contacts_tab
                     and control.is_displayed() and control.is_enabled()):
+                previous = driver.find_elements(By.CSS_SELECTOR, selector)
                 control.click()
                 with suppress(TimeoutException):
-                    selector = (
-                        ".business-contacts-view__address-link" if caption == "контакты"
-                        else f"a[href^='tel:'], .card-phones-view__number, {ORG_PHONE_SELECTOR}"
+                    WebDriverWait(driver, 2).until(
+                        lambda page: page.find_elements(By.CSS_SELECTOR, selector) != previous
                     )
-                    WebDriverWait(driver, 2).until(lambda page: page.find_elements(By.CSS_SELECTOR, selector))
-                check_page(driver)
+                check_page(driver, inspect_body=True)
                 break
 
 
@@ -185,14 +188,19 @@ def html_value(element) -> str:
     return text(element.get("content") or element.get_text(" ")) if element else ""
 
 
-def parse_card(html: str, identity: str, parser, listing: Listing | None = None) -> dict | None:
+def parse_card(html: str | bytes, identity: str | None = None, listing: Listing | None = None) -> dict | None:
     soup = BeautifulSoup(html, "lxml")
-    name = text(parser.get_name(soup)) or html_value(soup.select_one(HEADING_SELECTOR))
+    if identity is None:
+        for element in soup.select("link[rel='canonical'][href], meta[property='og:url'][content]"):
+            if match := org_url(text(element.get("href") or element.get("content"))):
+                identity = match[0]
+                break
+    name = html_value(soup.select_one(HEADING_SELECTOR))
     if not name and listing:
         name = listing.name
-    if not name:
+    if not identity or not name:
         return None
-    address = text(parser.get_address(soup))
+    address = html_value(soup.select_one(ADDRESS_SELECTOR))
     if not address:
         street = html_value(soup.select_one("[itemprop='streetAddress']"))
         locality = html_value(soup.select_one("[itemprop='addressLocality']"))
@@ -200,22 +208,23 @@ def parse_card(html: str, identity: str, parser, listing: Listing | None = None)
     if not address and listing:
         address = listing.address
 
-    phones = parser.get_phone(soup) or []
-    phones.extend(html_value(element) for element in soup.select(ORG_PHONE_SELECTOR))
-    phones.extend(text(anchor.get("href")) for anchor in soup.select("a[href^='tel:']"))
-    socials = [text(url) for url in parser.get_social(soup) or []]
-    socials.extend(text(anchor.get("href")) for anchor in soup.select(
+    phones = [html_value(element) for element in soup.select(PHONE_SELECTOR)]
+    phones.extend(text(anchor.get("href"))[4:] for anchor in soup.select(TEL_SELECTOR))
+    social_links = soup.select(
         f".business-contacts-view a[href], {SOCIAL_BUTTON_SELECTOR}, "
-        ".card-contacts-view a[href], a[itemprop='sameAs'][href]"
-    ))
+        ".card-contacts-view a[href], a[itemprop='sameAs'][href], link[itemprop='sameAs'][href], "
+        "a.button._view_secondary-gray._ui._size_medium._link[href]"
+    )
+    socials = [text(link.get("href")) for link in social_links]
+    socials = ["https:" + url if url.startswith("//") else url for url in socials]
     return {
         "id": identity, "name": name, "address": address or None,
-        "phones": unique_phones([text(phone) for phone in phones]),
+        "phones": unique_phones(phones),
         "socials": list(dict.fromkeys(url for url in socials if social_url(url))),
     }
 
 
-def run_search(driver, city: str, query: str, count: int, parser) -> dict:
+def run_search(driver, city: str, query: str, count: int) -> dict:
     links = gather_links(driver, city, query, count)
     rows = []
     issues = None
@@ -226,7 +235,7 @@ def run_search(driver, city: str, query: str, count: int, parser) -> dict:
             WebDriverWait(driver, 8).until(lambda page: page.find_elements(By.CSS_SELECTOR, CARD_DETAIL_SELECTOR))
             with suppress(ElementClickInterceptedException, StaleElementReferenceException):
                 click_public_contacts(driver)
-            row = parse_card(driver.page_source, identity, parser, listing)
+            row = parse_card(driver.page_source, identity, listing)
         except CardError as error:
             issues = {"code": error.code, "message": str(error)}
             break
@@ -268,19 +277,44 @@ def visible_search_details(driver) -> dict:
 
 def main() -> int:
     arguments = argparse.ArgumentParser()
-    arguments.add_argument("--browser", required=True)
+    arguments.add_argument("--browser")
     arguments.add_argument("--driver")
-    arguments.add_argument("--repo", type=Path)
+    arguments.add_argument("--repo", type=Path, help=argparse.SUPPRESS)  # Older diagnostic commands.
     arguments.add_argument("--city")
     arguments.add_argument("--query")
     arguments.add_argument("--limit", type=int, default=2)
     arguments.add_argument("--output", type=Path)
+    arguments.add_argument("--card-url", help="Yandex Maps card URL when saved HTML lacks a canonical URL")
     mode = arguments.add_mutually_exclusive_group()
     mode.add_argument("--check-browser", action="store_true")
     mode.add_argument("--diagnose", action="store_true")
+    mode.add_argument("--html", type=Path, help="parse a saved Yandex Maps card")
     options = arguments.parse_args()
-    if not options.check_browser and not all((options.repo, options.city, options.query, options.output or options.diagnose)):
-        arguments.error("--repo, --city, --query and either --output or --diagnose are required for a search")
+    if options.html:
+        identity = None
+        if options.card_url:
+            match = org_url(options.card_url)
+            if not match:
+                arguments.error("--card-url must be a Yandex Maps organization URL")
+            identity = match[0]
+        try:
+            row = parse_card(options.html.read_bytes(), identity)
+        except OSError as error:
+            arguments.error(str(error))
+        if not row:
+            arguments.error("Не удалось найти название и ID организации в HTML карточки.")
+        payload = json.dumps({"companies": [row], "issue": None}, ensure_ascii=False, indent=2)
+        if options.output:
+            options.output.write_text(payload + "\n", encoding="utf-8")
+        else:
+            print(payload)
+        return 0
+    if options.card_url:
+        arguments.error("--card-url requires --html")
+    if not options.browser:
+        arguments.error("--browser is required for browser mode")
+    if not options.check_browser and not all((options.city, options.query, options.output or options.diagnose)):
+        arguments.error("--city, --query and either --output or --diagnose are required for a search")
 
     driver = None
     result = None
@@ -291,10 +325,7 @@ def main() -> int:
             driver.get("about:blank")
             driver.execute_script("document.title = 'Maps browser OK'")
             return 0 if driver.title == "Maps browser OK" else 1
-        sys.path.insert(0, str(options.repo))
-        from soup_parser import SoupContentParser
-
-        result = run_search(driver, options.city, options.query, options.limit, SoupContentParser())
+        result = run_search(driver, options.city, options.query, options.limit)
     except CardError as error:
         result = {"companies": [], "issue": {"code": error.code, "message": str(error)}}
     except WebDriverException as error:

@@ -94,7 +94,6 @@ class MapSources:
         self.chrome = chrome
         self.chrome_driver = chrome_driver
         self.two_gis = root / "sources" / "parser-2gis"
-        self.yandex = root / "sources" / "parser_maps"
         data = self.two_gis / "parser_2gis" / "data"
         self.cities = russian_cities(data / "cities.json")
         self.rubrics = russian_rubrics(data / "rubrics.json")
@@ -180,7 +179,7 @@ class MapSources:
     def _yandex_argv(self, target: Target, count: int, output: Path) -> list[str]:
         args = [
             str(self.root / "venv" / "bin" / "python"), str(self.root / "yandex_chrome.py"),
-            "--browser", self.chrome, "--repo", str(self.yandex), "--output", str(output),
+            "--browser", self.chrome, "--output", str(output),
             "--city", target.city.name, "--query", target.query, "--limit", str(count),
         ]
         if self.chrome_driver:
