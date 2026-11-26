@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -14,12 +14,14 @@ from selenium.common.exceptions import ElementClickInterceptedException, StaleEl
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 from companies import social_url, text, unique_phones, web_host
 
 
 LISTING_SELECTOR = "a.search-snippet-view__link-overlay, a[href*='/maps/org/']"
+SEARCH_INPUT = "input.search-form-view__input, .search-form-view input, input[role='searchbox'], input[aria-label='Поиск'], input[aria-label='Search']"
 HEADING_SELECTOR = "h1.orgpage-header-view__header, h1.business-card-title-view__title, h1[itemprop='name']"
 CONTACT_SELECTORS = (
     "[role='tab']", "button", "[role='button']",
@@ -49,12 +51,13 @@ def create_driver(binary: str, driver_binary: str | None = None):
 
 
 def org_url(url: str) -> tuple[str, str] | None:
-    if web_host(url) not in {"yandex.ru", "www.yandex.ru", "yandex.com", "www.yandex.com"}:
+    host = web_host(url)
+    if host not in {"yandex.ru", "www.yandex.ru", "yandex.com", "www.yandex.com"}:
         return None
     match = YANDEX_ORG.match(urlsplit(url).path)
     if match:
         identity = match[1]
-        return identity, f"https://yandex.ru/maps/org/{identity}/"
+        return identity, f"https://{host}/maps/org/{identity}/"
     return None
 
 
@@ -77,8 +80,21 @@ def listing_links(driver) -> tuple[list, dict[str, str]]:
 
 
 def gather_links(driver, city: str, query: str, count: int) -> dict[str, str]:
-    params = urlencode({"mode": "search", "text": f"{city} {query}"})
-    driver.get("https://yandex.ru/maps/?" + params)
+    driver.get("https://yandex.ru/maps")
+
+    def search_field(page):
+        check_page(page)
+        return next((field for field in page.find_elements(By.CSS_SELECTOR, SEARCH_INPUT)
+                     if field.is_displayed() and field.is_enabled()), None)
+
+    try:
+        field = WebDriverWait(driver, 10).until(search_field)
+    except TimeoutException:
+        check_page(driver)
+        raise CardError("search_layout", "Карты Яндекса не показали поле поиска.") from None
+
+    field.clear()
+    field.send_keys(f"{city} {query}", Keys.ENTER)
     try:
         links = WebDriverWait(driver, 10).until(lambda page: listing_links(page)[1])
     except TimeoutException:

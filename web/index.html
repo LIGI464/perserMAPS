@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Парсер компаний</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/parser.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-content">
+      <span class="brand-mark" aria-hidden="true">A</span>
+      <span class="brand">AERVO</span>
+      <span class="header-slash" aria-hidden="true">/</span>
+      <span class="section-label">Парсер компаний</span>
+    </div>
+  </header>
+  <main class="shell workspace">
+    <h1>Поиск компаний</h1>
+    <div class="workspace-grid">
+      <section class="panel filters" aria-labelledby="filters-title">
+        <h2 id="filters-title">Параметры поиска</h2>
+        <form id="search-form">
+          <fieldset>
+            <legend>Источник</legend>
+            <div class="source-options">
+              <label class="source-option">
+                <input type="radio" name="source" value="2gis" checked>
+                <span><i class="source-dot two-gis" aria-hidden="true"></i>2ГИС</span>
+              </label>
+              <label class="source-option">
+                <input type="radio" name="source" value="yandex">
+                <span><i class="source-dot yandex" aria-hidden="true"></i>Яндекс Карты</span>
+              </label>
+            </div>
+          </fieldset>
+          <div class="field">
+            <div class="field-heading">
+              <label for="city">Город</label>
+              <button type="button" class="field-action" data-all="city">Все города</button>
+            </div>
+            <input id="city" name="city" type="text" maxlength="160" placeholder="Например, Таганрог" required>
+          </div>
+          <div class="field">
+            <div class="field-heading">
+              <label for="company">Компания или категория</label>
+              <button type="button" class="field-action" data-all="company">Все</button>
+            </div>
+            <input id="company" name="company" type="text" maxlength="160" placeholder="Например, стоматология" required>
+          </div>
+          <div class="field">
+            <label for="limit">Количество компаний</label>
+            <input id="limit" name="limit" type="number" min="1" max="100" step="1" value="20" required>
+          </div>
+          <button type="submit" id="search-button" class="primary-button">Найти компании</button>
+        </form>
+      </section>
+      <section class="panel results" aria-labelledby="results-title">
+        <div class="results-header">
+          <div>
+            <h2 id="results-title">Результаты</h2>
+            <p id="results-summary" class="muted" aria-live="polite">Здесь появятся найденные компании</p>
+          </div>
+          <span id="results-source" class="source-tag" hidden></span>
+        </div>
+        <progress id="search-progress" aria-label="Поиск компаний" hidden></progress>
+        <p id="notice" class="notice" role="alert" hidden></p>
+        <div id="empty-state" class="empty-state">
+          <span class="empty-icon lens" aria-hidden="true"></span>
+          <p id="empty-message">Выберите источник и запустите поиск</p>
+        </div>
+        <div id="results-table" class="table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Компания</th>
+                <th scope="col">Точный адрес</th>
+                <th scope="col">Телефоны</th>
+                <th scope="col">Соцсети</th>
+                <th scope="col">Прозвон</th>
+              </tr>
+            </thead>
+            <tbody id="result-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

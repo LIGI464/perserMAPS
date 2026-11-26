@@ -13,6 +13,68 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+copy_application_files() {
+    local file
+    install -d -m 0755 "$application_dir/web/assets"
+    for file in app.py called.py companies.py sources.py yandex_chrome.py check-api.py requirements.txt; do
+        install -m 0644 "$bundle_dir/$file" "$application_dir/$file"
+    done
+    install -m 0644 "$bundle_dir/web/index.html" "$application_dir/web/index.html"
+    install -m 0644 "$bundle_dir/web/assets/"{styles.css,parser.js} "$application_dir/web/assets/"
+}
+
+configure_web_login() {
+    if ! grep -q '^PARSER_WEB_PASSWORD=' "$configuration"; then
+        (
+            umask 077
+            printf 'PARSER_WEB_PASSWORD=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" >> "$configuration"
+        )
+    fi
+}
+
+restart_application() {
+    systemctl restart "$service_user"
+    for _ in {1..20}; do
+        if curl -fsS --max-time 2 http://127.0.0.1:8765/health 2>/dev/null; then
+            printf '\nСлужба парсера запущена.\n'
+            python3 - "$configuration" <<'PY'
+import base64
+from pathlib import Path
+import sys
+from urllib.request import Request, urlopen
+
+settings = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+password = next(line.partition("=")[2] for line in reversed(settings) if line.startswith("PARSER_WEB_PASSWORD="))
+credentials = base64.b64encode(("parser:" + password).encode()).decode()
+request = Request("http://127.0.0.1:8765/", headers={"Authorization": "Basic " + credentials})
+with urlopen(request, timeout=5) as response:
+    if b'id="search-form"' not in response.read():
+        raise SystemExit("Форма поиска отсутствует на странице парсера.")
+print("WEB OK: страница открывается после входа.")
+PY
+            return
+        fi
+        sleep 0.5
+    done
+    systemctl --no-pager status "$service_user" || true
+    return 1
+}
+
+if [[ $# -eq 1 && $1 == --app-only ]]; then
+    if [[ ! -x $application_dir/venv/bin/python || ! -f $configuration ]]; then
+        printf 'Сначала запустите полную установку.\n' >&2
+        exit 1
+    fi
+    copy_application_files
+    configure_web_login
+    restart_application
+    exit 0
+fi
+if [[ $# -ne 0 ]]; then
+    printf 'Использование: bash install-vps.sh [--app-only]\n' >&2
+    exit 1
+fi
+
 if ! systemctl is-active --quiet "$service_user" && ss -H -ltn 'sport = :8765' | grep -q .; then
     printf 'Порт 8765 уже занят. Уточните, какой сервис на нём работает.\n' >&2
     exit 1
@@ -81,9 +143,7 @@ checkout_source() {
 checkout_source "$application_dir/sources/parser-2gis" https://github.com/interlark/parser-2gis.git e12cc050ea811ed76e65a1be938214b6583f9072
 checkout_source "$application_dir/sources/parser_maps" https://github.com/artemsteshenko/parser_maps.git 6049374956208280004e732bff2985c7ddd35d04
 
-for file in app.py called.py companies.py sources.py yandex_chrome.py check-api.py requirements.txt; do
-    install -m 0644 "$bundle_dir/$file" "$application_dir/$file"
-done
+copy_application_files
 
 if [[ ! -x $application_dir/venv/bin/python ]]; then
     python3 -m venv "$application_dir/venv"
@@ -117,17 +177,9 @@ if [[ ! -e $configuration ]]; then
         } > "$configuration"
     )
 fi
+configure_web_login
 
 install -m 0644 "$bundle_dir/persermaps-github.service" /etc/systemd/system/persermaps-github.service
 systemctl daemon-reload
 systemctl enable "$service_user"
-systemctl restart "$service_user"
-for _ in {1..20}; do
-    if curl -fsS --max-time 2 http://127.0.0.1:8765/health; then
-        printf '\nГотов к проверке: python3 %s/check-api.py 2gis Таганрог Стоматология 2\n' "$application_dir"
-        exit 0
-    fi
-    sleep 0.5
-done
-systemctl --no-pager status "$service_user" || true
-exit 1
+restart_application

@@ -10,7 +10,7 @@
 bash install-vps.sh
 ```
 
-Сервис работает под пользователем `persermaps-github`. Файлы лежат в `/opt/persermaps-github`, ключ хранится в `/etc/persermaps-github.env`, а SQLite в `/var/lib/persermaps-github/called.sqlite3`.
+Сервис работает под пользователем `persermaps-github`. Файлы лежат в `/opt/persermaps-github`, ключ и пароль страницы хранятся в `/etc/persermaps-github.env`, а SQLite в `/var/lib/persermaps-github/called.sqlite3`. Для обновления уже установленного приложения запустите `bash install-vps.sh --app-only` из актуального checkout.
 
 ## Проверка на VPS
 
@@ -26,7 +26,9 @@ python3 /opt/persermaps-github/check-api.py both все все 10
 
 `PARSER_DEFAULT_SOURCE` в файле `/etc/persermaps-github.env` задаёт источник для запросов с полями `city`, `company`, `limit`. Возможные значения `both`, `2gis`, `yandex`. При отсутствии настройки используется `both`. Перезапустите службу после изменения. Команда `check-api.py default Таганрог Стоматология 20 --show` проверяет запрос без поля `source` и выводит карточки в виде текста.
 
-## Подключение к сайту
+## Страница парсера
+
+Веб-страница открывается на `/`. Она отправляет запросы в API на том же адресе и даёт выбрать 2ГИС или Яндекс Карты. Логин `parser`, пароль берётся из `PARSER_WEB_PASSWORD`. Используйте HTTPS при публичном доступе к странице.
 
 Направьте `parser.example.com` на адрес VPS и добавьте отдельный HTTPS-хост в действующий прокси. Пример блока Caddy приведён ниже.
 
@@ -36,4 +38,4 @@ parser.example.com {
 }
 ```
 
-Передайте `PARSER_API_KEY` в секреты серверной части `example.com` и задайте `PARSER_API_BASE_URL=https://parser.example.com`. Описание контрактов и интерфейса находится в [промте для интеграции](PROMPT-INTEGRATION.md).
+Добавьте ссылку в меню основного сайта после проверки HTTPS. Контракт API для серверных интеграций доступен на `/docs`. Инструкция по кнопке находится в [промте для подключения](PROMPT-INTEGRATION.md).

@@ -12,9 +12,10 @@ import sqlite3
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Path as RoutePath
-from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, FastAPI, HTTPException, Path as RoutePath, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from called import CalledCompanies
@@ -145,6 +146,9 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
     default_source = os.environ.get("PARSER_DEFAULT_SOURCE", "both")
     if default_source not in ("both", "2gis", "yandex"):
         raise RuntimeError("PARSER_DEFAULT_SOURCE должен быть both, 2gis или yandex.")
+    web_password = os.environ.get("PARSER_WEB_PASSWORD", "")
+    if web_password and not re.fullmatch(r"[A-Za-z0-9_-]{20,256}", web_password):
+        raise RuntimeError("Задайте PARSER_WEB_PASSWORD длиной не менее 20 символов.")
     home = Path(__file__).resolve().parent
     store = CalledCompanies(Path(os.environ.get("PARSER_DB_PATH", "data/called.sqlite3")))
     if source_override is None:
@@ -156,6 +160,7 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
     jobs: dict[str, Job] = {}
     active: asyncio.Task | None = None
     bearer = HTTPBearer(auto_error=False)
+    basic = HTTPBasic(auto_error=False)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -168,12 +173,42 @@ def create_app(source_override: MapSources | None = None) -> FastAPI:
 
     app = FastAPI(title="Парсер компаний", version="1.0", lifespan=lifespan)
 
-    def require_key(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> None:
-        if not credentials or not secrets.compare_digest(credentials.credentials.encode(), api_key.encode()):
+    def valid_web_login(credentials: HTTPBasicCredentials | None) -> bool:
+        return bool(
+            web_password and credentials
+            and secrets.compare_digest(credentials.username.encode(), b"parser")
+            and secrets.compare_digest(credentials.password.encode(), web_password.encode())
+        )
+
+    def require_key(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+        web_login: Annotated[HTTPBasicCredentials | None, Depends(basic)],
+    ) -> None:
+        if credentials and secrets.compare_digest(credentials.credentials.encode(), api_key.encode()):
+            return
+        if valid_web_login(web_login):
+            if request.method in ("POST", "PUT") and request.headers.get("sec-fetch-site") not in (None, "same-origin"):
+                raise HTTPException(status_code=403, detail={"message": "Откройте страницу парсера и повторите действие."})
+            return
+        raise HTTPException(
+            status_code=401, headers={"WWW-Authenticate": "Bearer"},
+            detail={"code": "unauthorized", "message": "Требуется авторизация в парсере."},
+        )
+
+    app.mount("/assets", StaticFiles(directory=home / "web" / "assets", check_dir=False), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    def web_page(credentials: Annotated[HTTPBasicCredentials | None, Depends(basic)]) -> FileResponse:
+        if not valid_web_login(credentials):
             raise HTTPException(
-                status_code=401, headers={"WWW-Authenticate": "Bearer"},
-                detail={"code": "unauthorized", "message": "Требуется ключ парсера."},
+                status_code=401, headers={"WWW-Authenticate": 'Basic realm="Company Parser"'},
+                detail={"message": "Войдите с логином parser и паролем страницы."},
             )
+        return FileResponse(home / "web" / "index.html", headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'",
+        })
 
     @app.exception_handler(sqlite3.Error)
     async def storage_failure(_request, _error) -> JSONResponse:
