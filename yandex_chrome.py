@@ -22,6 +22,7 @@ from companies import social_url, text, unique_phones, web_host
 
 LISTING_SELECTOR = "a.search-snippet-view__link-overlay, a[href*='/maps/org/']"
 SEARCH_INPUT = "input.search-form-view__input, .search-form-view input, input[role='searchbox'], input[aria-label='Поиск'], input[aria-label='Search']"
+SEARCH_BUTTON = ".small-search-form-view__button, .search-form-view button[type='submit'], button[aria-label='Найти'], button[aria-label='Search']"
 HEADING_SELECTOR = "h1.orgpage-header-view__header, h1.business-card-title-view__title, h1[itemprop='name']"
 CONTACT_SELECTORS = (
     "[role='tab']", "button", "[role='button']",
@@ -61,12 +62,12 @@ def org_url(url: str) -> tuple[str, str] | None:
     return None
 
 
-def check_page(driver) -> None:
+def check_page(driver, *, inspect_body: bool = False) -> None:
     path = urlsplit(driver.current_url).path.lower()
     title = driver.title or ""
     if "showcaptcha" in path or CHALLENGE_MESSAGE.search(title):
         raise CardError("access_restricted", "Яндекс показал ограничение доступа.")
-    if not title:
+    if inspect_body or not title:
         body = driver.execute_script("return (document.body?.innerText || '').trim().slice(0, 32)")
         if isinstance(body, str) and body.casefold() == "limited":
             raise CardError("access_restricted", "Карты Яндекса вернули страницу limited.")
@@ -90,15 +91,24 @@ def gather_links(driver, city: str, query: str, count: int) -> dict[str, str]:
     try:
         field = WebDriverWait(driver, 10).until(search_field)
     except TimeoutException:
-        check_page(driver)
+        check_page(driver, inspect_body=True)
         raise CardError("search_layout", "Карты Яндекса не показали поле поиска.") from None
 
     field.clear()
-    field.send_keys(f"{city} {query}", Keys.ENTER)
+    field.send_keys(f"{city} {query}")
+    submit = next((button for button in driver.find_elements(By.CSS_SELECTOR, SEARCH_BUTTON)
+                   if button.is_displayed() and button.is_enabled()), None)
     try:
-        links = WebDriverWait(driver, 10).until(lambda page: listing_links(page)[1])
+        if submit is None:
+            field.send_keys(Keys.ENTER)
+        else:
+            submit.click()
+    except (ElementClickInterceptedException, StaleElementReferenceException):
+        raise CardError("search_layout", "Кнопка поиска Яндекса недоступна на открытой странице.") from None
+    try:
+        links = WebDriverWait(driver, 15).until(lambda page: listing_links(page)[1])
     except TimeoutException:
-        check_page(driver)
+        check_page(driver, inspect_body=True)
         if EMPTY_MESSAGE.search(driver.find_element(By.TAG_NAME, "body").text):
             return {}
         raise CardError("search_layout", "Яндекс не показал ссылки на карточки. Нужна проверка страницы поиска.") from None
@@ -187,6 +197,32 @@ def run_search(driver, city: str, query: str, count: int, parser) -> dict:
     return {"companies": rows, "issue": issues}
 
 
+def visible_search_details(driver) -> dict:
+    return driver.execute_script(r"""
+        const links = [...document.querySelectorAll('a[href]')];
+        const pathTypes = new Set();
+        for (const link of links) {
+            try {
+                const url = new URL(link.href);
+                if (url.pathname.startsWith('/maps/')) {
+                    const segments = url.pathname.split('/').filter(Boolean);
+                    pathTypes.add(url.hostname + '/' + segments.slice(0, 2).join('/'));
+                }
+            } catch {}
+        }
+        return {
+            page: location.hostname + location.pathname,
+            title: document.title,
+            search_query: new URLSearchParams(location.search).get('text'),
+            navigation_status: performance.getEntriesByType('navigation')[0]?.responseStatus ?? null,
+            organization_links: links.filter((link) => link.href.includes('/org/')).length,
+            search_snippets: document.querySelectorAll('[class*="search-snippet"]').length,
+            map_link_types: [...pathTypes].slice(0, 10),
+            visible_text: (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        };
+    """)
+
+
 def main() -> int:
     arguments = argparse.ArgumentParser()
     arguments.add_argument("--browser", required=True)
@@ -196,12 +232,15 @@ def main() -> int:
     arguments.add_argument("--query")
     arguments.add_argument("--limit", type=int, default=2)
     arguments.add_argument("--output", type=Path)
-    arguments.add_argument("--check-browser", action="store_true")
+    mode = arguments.add_mutually_exclusive_group()
+    mode.add_argument("--check-browser", action="store_true")
+    mode.add_argument("--diagnose", action="store_true")
     options = arguments.parse_args()
-    if not options.check_browser and not all((options.repo, options.city, options.query, options.output)):
-        arguments.error("--repo, --city, --query and --output are required for a search")
+    if not options.check_browser and not all((options.repo, options.city, options.query, options.output or options.diagnose)):
+        arguments.error("--repo, --city, --query and either --output or --diagnose are required for a search")
 
     driver = None
+    result = None
     try:
         driver = create_driver(options.browser, options.driver)
         driver.set_page_load_timeout(15)
@@ -224,10 +263,24 @@ def main() -> int:
         result = {"companies": [], "issue": {"code": "browser_error", "message": "Яндекс не открылся в Chrome."}}
     finally:
         if driver is not None:
+            if options.diagnose and result is not None and not result["companies"]:
+                if (result["issue"] or {}).get("code") != "access_restricted":
+                    with suppress(WebDriverException):
+                        print(json.dumps(visible_search_details(driver), ensure_ascii=False, indent=2))
             with suppress(WebDriverException):
                 driver.quit()
 
-    options.output.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    if options.output:
+        options.output.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    if options.diagnose:
+        rows = result["companies"]
+        print(json.dumps({
+            "returned": len(rows),
+            "with_address": sum(bool(row["address"]) for row in rows),
+            "with_phone": sum(bool(row["phones"]) for row in rows),
+            "with_social": sum(bool(row["socials"]) for row in rows),
+            "issue": result["issue"],
+        }, ensure_ascii=False, indent=2))
     return 0
 
 
