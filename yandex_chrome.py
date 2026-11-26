@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import suppress
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -21,10 +22,15 @@ from companies import social_url, text, unique_phones, web_host
 
 
 LISTING_SELECTOR = "a.search-snippet-view__link-overlay, a[href*='/maps/org/']"
+BUSINESS_RESULT = ".search-business-snippet-view"
+BUSINESS_RESULT_TITLE = ".search-business-snippet-view__title"
+BUSINESS_RESULT_ADDRESS = ".search-business-snippet-view__address"
 SEARCH_INPUT = "input.search-form-view__input, .search-form-view input, input[role='searchbox'], input[aria-label='Поиск'], input[aria-label='Search']"
 SEARCH_BUTTON = ".small-search-form-view__button, .search-form-view button[type='submit'], button[aria-label='Найти'], button[aria-label='Search']"
 HEADING_SELECTOR = "h1.orgpage-header-view__header, h1.business-card-title-view__title, h1[itemprop='name']"
 ORG_PHONE_SELECTOR = ".orgpage-phones-view__phone-number"
+SOCIAL_BUTTON_SELECTOR = ".business-contacts-view__social-button a[href]"
+CARD_DETAIL_SELECTOR = f"{HEADING_SELECTOR}, .business-contacts-view, {ORG_PHONE_SELECTOR}, {SOCIAL_BUTTON_SELECTOR}"
 CONTACT_SELECTORS = (
     "[role='tab']", "button", "[role='button']",
 )
@@ -32,6 +38,13 @@ CONTACT_BUTTON = re.compile(r"^(?:контакты|показать(?: все)? 
 EMPTY_MESSAGE = re.compile(r"ничего не найдено|не удалось ничего найти|результатов нет", re.I)
 CHALLENGE_MESSAGE = re.compile(r"captcha|капча|вы не робот|вы робот\?|доступ ограничен|access denied", re.I)
 YANDEX_ORG = re.compile(r"^/maps/org/(?:[^/]+/)?([0-9]{1,24})(?:/|$)")
+
+
+@dataclass(frozen=True)
+class Listing:
+    url: str
+    name: str = ""
+    address: str = ""
 
 
 class CardError(RuntimeError):
@@ -74,14 +87,34 @@ def check_page(driver, *, inspect_body: bool = False) -> None:
             raise CardError("access_restricted", "Карты Яндекса вернули страницу limited.")
 
 
-def listing_links(driver) -> tuple[list, dict[str, str]]:
+def listing_links(driver) -> tuple[list, dict[str, Listing]]:
     check_page(driver)
-    anchors = driver.find_elements(By.CSS_SELECTOR, LISTING_SELECTOR)
-    links = dict(link for element in anchors if (link := org_url(element.get_attribute("href") or "")))
+    candidates = driver.execute_script("""
+        const [resultSelector, titleSelector, addressSelector, legacySelector] = arguments;
+        const modern = [...document.querySelectorAll(resultSelector)]
+            .filter((row) => row.getClientRects().length)
+            .flatMap((row) => [...row.querySelectorAll('a[href*="/org/"]')]);
+        const links = modern.length ? modern : [...document.querySelectorAll(legacySelector)];
+        return links.map((anchor) => {
+            const row = anchor.closest(resultSelector);
+            return {
+                anchor, href: anchor.href,
+                name: row?.querySelector(titleSelector)?.innerText || '',
+                address: row?.querySelector(addressSelector)?.innerText || '',
+            };
+        });
+    """, BUSINESS_RESULT, BUSINESS_RESULT_TITLE, BUSINESS_RESULT_ADDRESS, LISTING_SELECTOR)
+    anchors = []
+    links: dict[str, Listing] = {}
+    for candidate in candidates:
+        if match := org_url(candidate["href"]):
+            identity, url = match
+            links.setdefault(identity, Listing(url, text(candidate["name"]), text(candidate["address"])))
+            anchors.append(candidate["anchor"])
     return anchors, links
 
 
-def gather_links(driver, city: str, query: str, count: int) -> dict[str, str]:
+def gather_links(driver, city: str, query: str, count: int) -> dict[str, Listing]:
     driver.get("https://yandex.ru/maps")
 
     def search_field(page):
@@ -123,7 +156,7 @@ def gather_links(driver, city: str, query: str, count: int) -> dict[str, str]:
         driver.execute_script("arguments[0].scrollIntoView({block: 'end'})", anchors[-1])
         try:
             more = WebDriverWait(driver, 2).until(
-                lambda page: {key: url for key, url in listing_links(page)[1].items() if key not in links}
+                lambda page: {key: listing for key, listing in listing_links(page)[1].items() if key not in links}
             )
         except TimeoutException:
             break
@@ -152,9 +185,11 @@ def html_value(element) -> str:
     return text(element.get("content") or element.get_text(" ")) if element else ""
 
 
-def parse_card(html: str, identity: str, parser) -> dict | None:
+def parse_card(html: str, identity: str, parser, listing: Listing | None = None) -> dict | None:
     soup = BeautifulSoup(html, "lxml")
     name = text(parser.get_name(soup)) or html_value(soup.select_one(HEADING_SELECTOR))
+    if not name and listing:
+        name = listing.name
     if not name:
         return None
     address = text(parser.get_address(soup))
@@ -162,13 +197,16 @@ def parse_card(html: str, identity: str, parser) -> dict | None:
         street = html_value(soup.select_one("[itemprop='streetAddress']"))
         locality = html_value(soup.select_one("[itemprop='addressLocality']"))
         address = ", ".join(part for part in (locality, street) if part)
+    if not address and listing:
+        address = listing.address
 
     phones = parser.get_phone(soup) or []
     phones.extend(html_value(element) for element in soup.select(ORG_PHONE_SELECTOR))
     phones.extend(text(anchor.get("href")) for anchor in soup.select("a[href^='tel:']"))
     socials = [text(url) for url in parser.get_social(soup) or []]
     socials.extend(text(anchor.get("href")) for anchor in soup.select(
-        ".business-contacts-view a[href], .card-contacts-view a[href], a[itemprop='sameAs'][href]"
+        f".business-contacts-view a[href], {SOCIAL_BUTTON_SELECTOR}, "
+        ".card-contacts-view a[href], a[itemprop='sameAs'][href]"
     ))
     return {
         "id": identity, "name": name, "address": address or None,
@@ -181,14 +219,14 @@ def run_search(driver, city: str, query: str, count: int, parser) -> dict:
     links = gather_links(driver, city, query, count)
     rows = []
     issues = None
-    for identity, url in links.items():
+    for identity, listing in links.items():
         try:
-            driver.get(url)
-            check_page(driver)
-            WebDriverWait(driver, 8).until(lambda page: page.find_elements(By.CSS_SELECTOR, HEADING_SELECTOR))
+            driver.get(listing.url)
+            check_page(driver, inspect_body=True)
+            WebDriverWait(driver, 8).until(lambda page: page.find_elements(By.CSS_SELECTOR, CARD_DETAIL_SELECTOR))
             with suppress(ElementClickInterceptedException, StaleElementReferenceException):
                 click_public_contacts(driver)
-            row = parse_card(driver.page_source, identity, parser)
+            row = parse_card(driver.page_source, identity, parser, listing)
         except CardError as error:
             issues = {"code": error.code, "message": str(error)}
             break
